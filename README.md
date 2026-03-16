@@ -46,10 +46,10 @@ uv sync
 pip install -e ".[dev]"
 ```
 
-### From PyPI (Coming Soon)
+### From PyPI 
 
 ```bash
-pip install dream-net
+pip install dream-audio
 ```
 
 ---

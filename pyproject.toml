@@ -1,6 +1,6 @@
 [project]
-name = "dream-net"
-version = "0.2.0"
+name = "dream-audio"
+version = "0.1.0"
 description = "Dynamic Recall and Elastic Adaptive Memory — continuous-time RNN with surprise-driven plasticity"
 readme = "README.md"
 license = { text = "MIT" }
