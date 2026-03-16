@@ -1,0 +1,133 @@
+[project]
+name = "dream-net"
+version = "0.2.0"
+description = "Dynamic Recall and Elastic Adaptive Memory — continuous-time RNN with surprise-driven plasticity"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13"
+authors = [
+    { name = "Bagzhan Karl", email = "bagzhankarl@manifestro.io" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
+]
+keywords = [
+    "deep-learning",
+    "rnn",
+    "continual-learning",
+    "adaptive-systems",
+    "pytorch",
+    "speech-processing",
+]
+
+dependencies = [
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "matplotlib>=3.10.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.9.0",
+    "mypy>=1.14.0",
+]
+experiments = [
+    "matplotlib>=3.10.0",
+    "numpy>=1.26.0",
+    "torchcodec>=0.10.0",
+]
+docs = [
+    "sphinx>=8.0.0",
+    "sphinx-rtd-theme>=3.0.0",
+    "myst-parser>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/karl4th/dream-net"
+Repository = "https://github.com/karl4th/dream-net.git"
+Issues = "https://github.com/karl4th/dream-net/issues"
+Changelog = "https://github.com/karl4th/dream-net/releases"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dream_net"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/README.md",
+    "/LICENSE",
+    "/CITATION.cff",
+]
+
+# -----------------------------------------------------------------------------
+# Ruff (linting)
+# -----------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "experiments", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "TCH",    # flake8-type-checking
+]
+ignore = [
+    "E501",   # line too long (black handles this)
+    "B028",   # no explicit stacklevel in warnings
+    "B904",   # raise without from inside except
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dream_net"]
+force-single-line = false
+
+# -----------------------------------------------------------------------------
+# Mypy (type checking)
+# -----------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "torchaudio.*", "matplotlib.*", "numpy.*"]
+ignore_missing_imports = true
+
+# -----------------------------------------------------------------------------
+# Pytest (testing)
+# -----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

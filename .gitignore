@@ -1,0 +1,75 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Project-specific
+# -----------------------------------------------------------------------------
+
+# Audio data (large files, use Git LFS if needed)
+data/*.wav
+data/**/*.wav
+audio/*.wav
+audio/**/*.wav
+*.wav
+
+# Results and plots
+results/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+
+# Jupyter notebooks
+notebooks/*.ipynb
+notebooks/.ipynb_checkpoints/
+
+# Experiment outputs
+experiments/*.png
+experiments/*.csv
+experiments/*.json
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+tmp/
+temp/
+.cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Documentation builds
+docs/_build/
+docs/.doctrees/
+
+# Citation
+CITATION.cff

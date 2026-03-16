@@ -1,0 +1,16 @@
+# Git LFS for large binary files
+# Install with: git lfs install
+
+# Audio files
+*.wav filter=lfs diff=lfs merge=lfs -text
+*.mp3 filter=lfs diff=lfs merge=lfs -text
+*.flac filter=lfs diff=lfs merge=lfs -text
+*.ogg filter=lfs diff=lfs merge=lfs -text
+
+# Checkpoint files (if needed)
+*.pt filter=lfs diff=lfs merge=lfs -text
+*.pth filter=lfs diff=lfs merge=lfs -text
+*.bin filter=lfs diff=lfs merge=lfs -text
+
+# Large plots/figures (optional)
+# *.png filter=lfs diff=lfs merge=lfs -text

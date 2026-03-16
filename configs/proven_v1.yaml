@@ -1,0 +1,81 @@
+# DREAM proven_v1 — validated configuration
+# ============================================
+# Locked after Experiment 6 (spike-reset ablation).
+# All values confirmed across 6 experiments on 3-speaker CommonVoice audio
+# (log-mel spectrogram, 80 bands, SR=16000, hop=160, 100 fps).
+#
+# Key results at this config:
+#   Mean loss (21s, 3-speaker cycle)  Full=1.247  Static=1.810  GRU=3.235
+#   DREAM vs GRU advantage            -53% mean loss, 4.6× fewer parameters
+#   Speaker A progressive improvement A¹=1.48 → A²=0.84 → A³=0.79
+#   Memory integrity                  all 7 segments bounded, no corruption
+#
+# Do NOT change these without re-running the full experiment suite.
+# Next planned use: streaming ASR encoder (CTC head on top).
+
+# ── Model dimensions ──────────────────────────────────────────────────────────
+model:
+  input_dim: 80          # log-mel bands; change to 39 for MFCC
+  hidden_dim: 256        # d_state; rank ablation done at this size
+  rank: 8                # fast-weight rank — sweet spot (Exp 3 ablation):
+                         #   8 KB memory, within 11% of rank=64, 4× smaller
+
+# ── Plasticity ────────────────────────────────────────────────────────────────
+plasticity:
+  base_plasticity: 0.4           # η — Hebbian learning rate (eta parameter)
+                                 # tuned in Exp 1: 0.1 (default) too slow,
+                                 # 0.4 gives fast in-context adaptation
+  forgetting_rate: 0.03          # λ — base decay rate toward U_target
+                                 # raised from default 0.01; prevents U saturation
+  adaptive_forgetting_scale: 8.0 # k — λ_eff = λ × (1 + k × S_t)
+                                 # KEY: introduced in Exp 2 to clear stale
+                                 # patterns at speaker switches without hard reset
+                                 # Exp 6 confirmed spike-reset is not needed
+
+# ── Surprise gate ─────────────────────────────────────────────────────────────
+surprise:
+  base_threshold: 0.35           # τ₀ — lowered from default 0.5; 80-dim mel
+                                 # needs lower threshold than 39-dim MFCC
+  entropy_influence: 0.2         # α — kept at default; stable across all runs
+  surprise_temperature: 0.12     # γ — sigmoid sharpness; 0.12 gives clean
+                                 # binary-ish gate without gradient explosion
+
+# ── Liquid Time-Constants (LTC) ───────────────────────────────────────────────
+ltc:
+  ltc_enabled: true
+  ltc_tau_sys: 5.0               # τ_sys — halved from default 10.0;
+                                 # faster baseline integration for 100fps audio
+  ltc_surprise_scale: 8.0        # stored in log-space inside the model:
+                                 # nn.Parameter initialised as log(8.0)=2.08
+                                 # exp(param) starts at 8.0, learned during
+                                 # pre-train; high value = large τ modulation
+
+# ── Temporal integration ──────────────────────────────────────────────────────
+integration:
+  time_step: 0.1                 # dt for Euler integration; matches hop=160
+                                 # (10 ms per frame, dt=0.1 s → scale factor)
+
+# ── Statistics smoothing ──────────────────────────────────────────────────────
+smoothing:
+  error_smoothing: 0.01          # β — EMA for error_mean / error_var (default)
+  surprise_smoothing: 0.01       # β_s — EMA for avg_surprise (default)
+
+# ── Homeostasis ───────────────────────────────────────────────────────────────
+homeostasis:
+  target_norm: 2.0               # ||U_target|| target; default, stable
+  kappa: 0.5                     # homeostasis coefficient; default, not tuned
+
+# ── Sleep consolidation ───────────────────────────────────────────────────────
+sleep:
+  sleep_rate: 0.005              # ζ — slow transfer U → U_target during calm
+  min_surprise_for_sleep: 0.25   # S_min — raised from default 0.2 to reduce
+                                 # false sleep triggers during speaker pauses
+
+# ── Pre-training protocol (not a model param, but part of the proven setup) ───
+pretrain:
+  epochs: 30
+  lr: 3.0e-3
+  clip_grad: 1.0
+  trainable: [C, W, B, tau_sys, ltc_surprise_scale]  # eta/V frozen
+  mode: static          # fast weights OFF during pre-train
+  seed: 42
