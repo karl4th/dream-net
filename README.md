@@ -49,7 +49,7 @@ pip install -e ".[dev]"
 ### From PyPI 
 
 ```bash
-pip install dream-audio
+pip install dream-network
 ```
 
 ---

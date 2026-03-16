@@ -1,5 +1,5 @@
 [project]
-name = "dream-audio"
+name = "dream-network"
 version = "0.1.0"
 description = "Dynamic Recall and Elastic Adaptive Memory — continuous-time RNN with surprise-driven plasticity"
 readme = "README.md"
