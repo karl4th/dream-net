@@ -28,7 +28,7 @@ from dream_net import DREAMConfig, DREAMCell
 # Phoneme vocabulary — loaded from vocab.txt
 # ---------------------------------------------------------------------------
 
-DATASET_DIR = "data/dataset"
+DATASET_DIR = "/content/dream-net/data/dataset"
 VOCAB_PATH  = os.path.join(DATASET_DIR, "vocab.txt")
 METADATA    = os.path.join(DATASET_DIR, "metadata.csv")
 AUDIO_DIR   = os.path.join(DATASET_DIR, "audio")
