@@ -1,0 +1,84 @@
+# DREAM proven_v2 — validated configuration for reconstruction quality
+# =====================================================================
+# Locked after Experiment 7 (reconstruction + multi-speaker test).
+# Key discovery: detach-h pretrain (proven_v1) produces a useless C matrix.
+# Fix: full BPTT with mel-space MSE + fast weights ON during training.
+#
+# Key results at this config (LJSpeech 50 files, 200K params):
+#   DREAM full (seen)    MSE = 0.150   vs LSTM 0.112  TF 0.143
+#   DREAM full (unseen)  MSE = 0.136   vs LSTM 0.124  TF 0.159
+#   Multi-speaker (44s)  MSE = 0.168   vs LSTM 0.165  TF 0.195
+#   Speaker 2 (hardest)  MSE = 0.182   vs LSTM 0.189  → DREAM wins
+#
+# What changed vs proven_v1:
+#   - Training: BPTT (chunk=20) + mel-space MSE loss  (was: detach-h, normalized loss)
+#   - Fast weights ON during training                  (was: static mode only)
+#   - hidden_dim: 833 for ~200K params with LSTM/TF    (was: 256 for speaker experiments)
+#   - LR: 1e-3, clip_grad: 0.5                         (was: 3e-3, 1.0)
+#
+# Do NOT use proven_v1 training protocol for reconstruction or ASR tasks.
+# proven_v1 is only valid for measuring DREAM's own normalized prediction loss
+# in speaker-switching experiments (Exps 1-6).
+
+# ── Model dimensions ──────────────────────────────────────────────────────────
+model:
+  input_dim: 80          # log-mel bands
+  hidden_dim: 833        # matched to ~200K params with LSTM/TF baselines
+  rank: 8                # fast-weight rank — sweet spot from Exp 3
+
+# ── Plasticity ────────────────────────────────────────────────────────────────
+plasticity:
+  base_plasticity: 0.4
+  forgetting_rate: 0.03
+  adaptive_forgetting_scale: 8.0
+
+# ── Surprise gate ─────────────────────────────────────────────────────────────
+surprise:
+  base_threshold: 0.35
+  entropy_influence: 0.2
+  surprise_temperature: 0.12
+
+# ── Liquid Time-Constants (LTC) ───────────────────────────────────────────────
+ltc:
+  ltc_enabled: true
+  ltc_tau_sys: 5.0
+  ltc_surprise_scale: 8.0
+
+# ── Temporal integration ──────────────────────────────────────────────────────
+integration:
+  time_step: 0.1
+
+# ── Statistics smoothing ──────────────────────────────────────────────────────
+smoothing:
+  error_smoothing: 0.01
+  surprise_smoothing: 0.01
+
+# ── Homeostasis ───────────────────────────────────────────────────────────────
+homeostasis:
+  target_norm: 2.0
+  kappa: 0.5
+
+# ── Sleep consolidation ───────────────────────────────────────────────────────
+sleep:
+  sleep_rate: 0.005
+  min_surprise_for_sleep: 0.25
+
+# ── Training protocol ─────────────────────────────────────────────────────────
+train:
+  epochs: 50
+  lr: 1.0e-3
+  clip_grad: 0.5
+  chunk: 20              # BPTT chunk size — above 20 causes gradient explosion
+                         # Jacobian per step ~0.99 with detached recurrent term;
+                         # ~1.29 without → NaN after 5 epochs
+  use_fast_weights: true # fast weights ON during training
+  loss: mel_mse          # mel-space MSE (not normalized) — same as LSTM/TF
+  mode: full             # full mode at inference
+
+# ── Known limitations at this config ─────────────────────────────────────────
+# notes:
+#   - ltc_tau_sys=5.0 makes h dynamics too slow for phoneme-level ASR
+#     (phoneme transitions ~10-30ms, LTC smooths them out)
+#   - BPTT chunk=20 (200ms) too short for CTC alignment over full sentences
+#   - Both limitations block end-to-end CTC training → see Exp 8 findings
+#   - Next: proven_v3 will lower tau for ASR and use full-sequence gradient
