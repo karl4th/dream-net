@@ -28,12 +28,14 @@ from dream_net import DREAMConfig, DREAMCell
 # Phoneme vocabulary — loaded from vocab.txt
 # ---------------------------------------------------------------------------
 
-DATASET_DIR = "/content/dream-net/data/dataset"
+_DEFAULT_DATASET = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "dataset")
+DATASET_DIR = os.environ.get("DREAM_DATASET_DIR", _DEFAULT_DATASET)
 VOCAB_PATH  = os.path.join(DATASET_DIR, "vocab.txt")
 METADATA    = os.path.join(DATASET_DIR, "metadata.csv")
 AUDIO_DIR   = os.path.join(DATASET_DIR, "audio")
 TG_DIR      = os.path.join(DATASET_DIR, "textgrid")
-RESULTS     = "results"
+_SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RESULTS     = os.path.join(_SCRIPT_DIR, "results")
 os.makedirs(RESULTS, exist_ok=True)
 
 with open(VOCAB_PATH) as f:
@@ -146,16 +148,43 @@ def build_mel(wav):
 # Dataset
 # ---------------------------------------------------------------------------
 
+def _find_textgrid(fid: str, tg_rel: str) -> str:
+    """
+    Resolve TextGrid path robustly.
+    Tries (in order):
+      1. DATASET_DIR / tg_rel  (as stored in metadata.csv)
+      2. tg_rel as absolute path
+      3. TG_DIR / basename(tg_rel)
+      4. TG_DIR / fid + '.TextGrid'
+    Returns the first path that exists, or '' if none found.
+    """
+    candidates = [
+        os.path.join(DATASET_DIR, tg_rel) if tg_rel else '',
+        tg_rel,
+        os.path.join(TG_DIR, os.path.basename(tg_rel)) if tg_rel else '',
+        os.path.join(TG_DIR, fid + '.TextGrid'),
+    ]
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    return ''
+
+
 def load_dataset(n=TRAIN_N):
+    # Build fid → textgrid_path map from metadata.csv (best-effort)
     meta = {}
-    with open(METADATA, encoding='utf-8') as f:
-        next(f)  # skip header
-        for line in f:
-            parts = line.strip().split('|')
-            if len(parts) >= 4:
-                meta[parts[0]] = parts[3]   # textgrid_path (relative)
+    try:
+        with open(METADATA, encoding='utf-8') as f:
+            next(f)  # skip header
+            for line in f:
+                parts = line.strip().split('|')
+                if len(parts) >= 4:
+                    meta[parts[0]] = parts[3]
+    except FileNotFoundError:
+        print(f"  [warn] metadata.csv not found at {METADATA}, will search TG_DIR directly")
 
     ds = []
+    skipped_no_tg = skipped_no_ph = 0
     for fname in sorted(os.listdir(AUDIO_DIR)):
         if len(ds) >= n:
             break
@@ -163,27 +192,29 @@ def load_dataset(n=TRAIN_N):
             continue
         fid    = fname.replace('.wav', '')
         tg_rel = meta.get(fid, '')
-        if not tg_rel:
-            continue
-        tg_path = os.path.join(DATASET_DIR, tg_rel)
-        if not os.path.exists(tg_path):
+        tg_path = _find_textgrid(fid, tg_rel)
+        if not tg_path:
+            skipped_no_tg += 1
             continue
 
         feats     = build_mel(load_wav(os.path.join(AUDIO_DIR, fname)))
         T         = feats.shape[0]
         intervals = parse_textgrid_phones(tg_path)
         if not intervals:
+            skipped_no_ph += 1
             continue
-        labels    = build_frame_labels(T, intervals)
+        labels = build_frame_labels(T, intervals)
 
-        # reference phoneme sequence (no sil/blank/unk) for PER
         ref = [ph for _, _, ph in intervals
                if ph not in ('<sil>', '<blank>', '<unk>', '')]
         if not ref:
+            skipped_no_ph += 1
             continue
 
         ds.append((feats, labels, ref))
 
+    if skipped_no_tg or skipped_no_ph:
+        print(f"  [info] skipped: {skipped_no_tg} (no TextGrid)  {skipped_no_ph} (no phonemes)")
     return ds
 
 
@@ -366,9 +397,12 @@ DREAMAcoustic2L = DREAMAcousticNL
 def train_model(model, dataset, epochs, save_path=None):
     """
     All files processed in parallel each epoch.
-    h carries full context across each file; BPTT detached every CHUNK_SIZE steps.
-    Updates per epoch = ceil(T_max / CHUNK_SIZE) — much more than 1.
+    Full BPTT (no h detach). STEPS_PER_EPOCH gradient steps per epoch.
     """
+    if not dataset:
+        print("  [error] dataset is empty — check AUDIO_DIR / TG_DIR paths")
+        return 1.0
+
     # build padded batch once
     feats_list  = [d[0] for d in dataset]
     labels_list = [d[1] for d in dataset]
@@ -467,7 +501,7 @@ def make_config(input_dim, hidden_dim):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=["1L", "2L", "3L", "4L", "both"], default="both",
+    parser.add_argument("--model", choices=["1L", "2L", "3L", "4L", "both"], default="2L",
                         help="1L=single 833, 2L/3L/4L=N×256 layers, both=1L+2L")
     args = parser.parse_args()
 
