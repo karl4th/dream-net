@@ -361,6 +361,9 @@ def train(model: DREAMAcousticNL, dataset: list, epochs: int,
           f"{epochs} epochs × {steps_per_epoch} steps | device={device}")
     print(f"{'─'*60}\n")
 
+    import time
+    block_start = time.time()
+
     for ep in range(epochs):
         model.train()
         last_loss = 0.0
@@ -397,13 +400,17 @@ def train(model: DREAMAcousticNL, dataset: list, epochs: int,
         sched.step()
 
         if (ep + 1) % 5 == 0:
-            mean_per = evaluate(model, dataset, device, quiet=True)
-            marker   = " ←best" if mean_per < best_per else ""
+            block_sec  = time.time() - block_start
+            epoch_sec  = block_sec / 5
+            mean_per   = evaluate(model, dataset, device, quiet=True)
+            marker     = " ←best" if mean_per < best_per else ""
             print(f"  epoch {ep+1:3d}/{epochs}  "
-                  f"ce={last_loss:.4f}  PER={mean_per*100:.1f}%{marker}")
+                  f"ce={last_loss:.4f}  PER={mean_per*100:.1f}%  "
+                  f"5ep={block_sec:.0f}s  1ep~{epoch_sec:.0f}s{marker}")
             if mean_per < best_per:
                 best_per = mean_per
                 torch.save(model.state_dict(), save_path)
+            block_start = time.time()
 
     # reload best
     if os.path.exists(save_path):
