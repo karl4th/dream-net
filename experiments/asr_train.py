@@ -311,8 +311,8 @@ def make_config(input_dim: int, hidden_dim: int) -> DREAMConfig:
     )
 
 
-def build_model(n_layers: int) -> DREAMAcousticNL:
-    dims = [N_MELS] + [DREAM_H2] * n_layers
+def build_model(n_layers: int, H2: int = DREAM_H2) -> DREAMAcousticNL:
+    dims = [N_MELS] + [H2] * n_layers
     cfgs = [make_config(dims[i], dims[i + 1]) for i in range(n_layers)]
     return DREAMAcousticNL(cfgs)
 
@@ -323,38 +323,41 @@ def build_model(n_layers: int) -> DREAMAcousticNL:
 
 def train(model: DREAMAcousticNL, dataset: list, epochs: int,
           steps_per_epoch: int, lr: float, device: torch.device,
-          save_path: str) -> float:
+          save_path: str, max_frames: int = 0) -> float:
 
     if not dataset:
         print("  [error] dataset is empty — check paths")
         return 1.0
 
-    # build padded batch (on CPU, will move to device each forward)
+    # build padded batch on GPU (full sequences, used for random crop each step)
     feats_list  = [d[0] for d in dataset]
     labels_list = [d[1] for d in dataset]
-    T_max = max(f.shape[0] for f in feats_list)
-    B     = len(dataset)
+    T_full = max(f.shape[0] for f in feats_list)
+    B      = len(dataset)
 
-    feats_pad  = torch.zeros(B, T_max, N_MELS)
-    labels_pad = torch.full((B, T_max), SIL_IDX, dtype=torch.long)
-    mask       = torch.zeros(B, T_max, dtype=torch.bool)
+    feats_full  = torch.zeros(B, T_full, N_MELS)
+    labels_full = torch.full((B, T_full), SIL_IDX, dtype=torch.long)
+    lengths     = torch.zeros(B, dtype=torch.long)
     for i, (f, l) in enumerate(zip(feats_list, labels_list)):
         T = f.shape[0]
-        feats_pad[i, :T]  = f
-        labels_pad[i, :T] = l
-        mask[i, :T]       = True
+        feats_full[i, :T]  = f
+        labels_full[i, :T] = l
+        lengths[i]         = T
 
-    # move batch to device once
-    feats_pad  = feats_pad.to(device)
-    labels_pad = labels_pad.to(device)
-    mask       = mask.to(device)
+    feats_full  = feats_full.to(device)
+    labels_full = labels_full.to(device)
+
+    # crop window per step: limits Python loop length → higher GPU-Util
+    crop = max_frames if max_frames > 0 else T_full
+    crop = min(crop, T_full)
 
     opt   = torch.optim.Adam(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs, eta_min=1e-5)
     n_p   = sum(p.numel() for p in model.parameters())
     best_per = 1.0
 
-    print(f"\nTraining {n_p:,} params | {B} files | T_max={T_max} | "
+    crop_info = f"crop={crop}" if max_frames > 0 else f"T_max={T_full}"
+    print(f"\nTraining {n_p:,} params | {B} files | T_full={T_full} | {crop_info} | "
           f"{epochs} epochs × {steps_per_epoch} steps | device={device}")
     print(f"{'─'*60}\n")
 
@@ -363,9 +366,26 @@ def train(model: DREAMAcousticNL, dataset: list, epochs: int,
         last_loss = 0.0
 
         for _ in range(steps_per_epoch):
-            logits      = model.forward_files(feats_pad)         # (B, T_max, N_CLS)
-            flat_logits = logits[mask]                           # (N_real, N_CLS)
-            flat_labels = labels_pad[mask]                       # (N_real,)
+            # random crop: each step sees a different window → better coverage
+            if max_frames > 0 and T_full > crop:
+                t0 = torch.randint(0, T_full - crop + 1, (1,)).item()
+            else:
+                t0 = 0
+            t1 = t0 + crop
+
+            feats_crop  = feats_full[:, t0:t1, :]    # (B, crop, N_MELS)
+            labels_crop = labels_full[:, t0:t1]       # (B, crop)
+
+            # mask: frames that actually belong to each file in this window
+            mask = torch.zeros(B, crop, dtype=torch.bool, device=device)
+            for i in range(B):
+                valid_end = min(int(lengths[i].item()) - t0, crop)
+                if valid_end > 0:
+                    mask[i, :valid_end] = True
+
+            logits      = model.forward_files(feats_crop)    # (B, crop, N_CLS)
+            flat_logits = logits[mask]
+            flat_labels = labels_crop[mask]
             loss        = F.cross_entropy(flat_logits, flat_labels)
 
             opt.zero_grad()
@@ -427,7 +447,8 @@ def main():
     parser.add_argument("--lr",       type=float, default=3e-3,   help="Learning rate (default: 3e-3)")
     parser.add_argument("--device",   type=str,   default="auto", help="Device: auto/cpu/cuda/cuda:0 (default: auto)")
     parser.add_argument("--save",     type=str,   default="",     help="Save path for weights (auto if empty)")
-    parser.add_argument("--load",     type=str,   default="",     help="Resume from checkpoint")
+    parser.add_argument("--load",       type=str,   default="",  help="Resume from checkpoint")
+    parser.add_argument("--max_frames", type=int,   default=400, help="Max frames per crop window during training (0=full, default: 400)")
     args = parser.parse_args()
 
     # ── Device ────────────────────────────────────────────────────────────
@@ -475,7 +496,8 @@ def main():
         print(f"  Resumed from: {args.load}")
 
     # ── Train ─────────────────────────────────────────────────────────────
-    train(model, dataset, args.epochs, args.steps, args.lr, device, save_path)
+    train(model, dataset, args.epochs, args.steps, args.lr, device, save_path,
+          max_frames=args.max_frames)
 
     # ── Final eval ────────────────────────────────────────────────────────
     print(f"{'═'*60}")
