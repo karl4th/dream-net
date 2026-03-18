@@ -425,16 +425,33 @@ def train(model: DREAMAcousticNL, dataset: list, epochs: int,
 
 def evaluate(model: DREAMAcousticNL, dataset: list, device: torch.device,
              verbose: bool = False, quiet: bool = False) -> float:
+    """Batched eval: runs forward_files on the whole dataset at once (B > 1)."""
     model.eval()
+
+    feats_list = [d[0] for d in dataset]
+    refs       = [d[2] for d in dataset]
+    B          = len(dataset)
+    T_max      = max(f.shape[0] for f in feats_list)
+
+    feats_pad = torch.zeros(B, T_max, N_MELS, device=device)
+    lengths   = []
+    for i, f in enumerate(feats_list):
+        T = f.shape[0]
+        feats_pad[i, :T] = f.to(device)
+        lengths.append(T)
+
+    with torch.no_grad():
+        logits = model.forward_files(feats_pad)   # (B, T_max, N_CLS)
+
     scores = []
-    for feats, _, ref in dataset:
-        feats = feats.to(device)
-        pred  = model.decode(feats)
+    for i, (ref, T) in enumerate(zip(refs, lengths)):
+        pred = decode_phones(logits[i, :T])
         scores.append(per(pred, ref))
         if verbose:
             print(f"  REF : {' '.join(ref[:15])} ...")
             print(f"  PRED: {' '.join(pred[:15])} ...")
             print(f"  PER : {scores[-1]:.3f}\n")
+
     mean = float(np.mean(scores))
     if not quiet:
         print(f"  PER = {mean:.4f}  ({mean*100:.1f}%)")
