@@ -300,32 +300,22 @@ class DREAMCell(nn.Module):
         torch.Tensor
             New hidden state (batch, hidden_dim)
         """
-        if self.tau_sys.item() < 0.01:
-            # LTC disabled: classic update
-            h_target = torch.tanh(input_effect)
-            return h_target * 0.95 + h_prev * 0.05
-        
-        # Dynamic time constant: tau = tau_sys / (1 + surprise * scale)
-        # High surprise → small tau → fast updates
-        # Low surprise → large tau → slow integration
-        # Using learnable ltc_surprise_scale
-        tau_dynamic = self.tau_sys / (1.0 + surprise * self.ltc_surprise_scale.exp())  # (batch,)
-        
-        # Stabilized clamping to prevent numerical issues
-        tau_effective = tau_dynamic.clamp(self.min_tau, self.max_tau)  # (batch,)
-        
-        # Compute h_target (where system wants to go)
         h_target = torch.tanh(input_effect)  # (batch, hidden)
-        
-        # Time-step normalized by tau with broadcasting
-        # dt_over_tau should be (batch, 1) for proper broadcasting
-        dt_over_tau = self.config.time_step / (tau_effective.unsqueeze(1) + self.config.time_step)  # (batch, 1)
-        dt_over_tau = dt_over_tau.clamp(0.01, 0.5)  # Stability
-        
+
+        # If tau_sys ~ 0: classic update (blended via tensor ops, no Python branch)
+        tau_sys_clamped = self.tau_sys.clamp(min=self.min_tau)
+        tau_dynamic = tau_sys_clamped / (1.0 + surprise * self.ltc_surprise_scale.exp())
+        tau_effective = tau_dynamic.clamp(self.min_tau, self.max_tau)  # (batch,)
+        dt_over_tau = self.config.time_step / (tau_effective.unsqueeze(1) + self.config.time_step)
+        dt_over_tau = dt_over_tau.clamp(0.01, 0.5)
+
         # LTC update: h_new = (1 - dt/tau) * h_prev + (dt/tau) * h_target
-        h_new = (1 - dt_over_tau) * h_prev + dt_over_tau * h_target
-        
-        return h_new
+        h_ltc = (1 - dt_over_tau) * h_prev + dt_over_tau * h_target
+
+        # Blend classic update when tau_sys is near zero (no Python sync)
+        classic = h_target * 0.95 + h_prev * 0.05
+        use_ltc = torch.sigmoid((self.tau_sys - 0.01) * 100.0)  # ~1 when tau>0.01, ~0 otherwise
+        return use_ltc * h_ltc + (1 - use_ltc) * classic
     
     def forward(
         self,
@@ -429,17 +419,15 @@ class DREAMCell(nn.Module):
         # ================================================================
         # Consolidate during calm periods (low surprise = rest/sleep state)
         # Transfers accumulated fast weights U → long-term U_target
+        # Sleep consolidation: runs as weighted blend — no Python branch, no GPU sync
         avg_surprise_mean = state.avg_surprise.mean()
+        sleep_gate = torch.sigmoid((self.S_min - avg_surprise_mean) * 50.0)  # ~1 when asleep
 
-        if avg_surprise_mean < self.S_min:
-            # Per-batch U_target update: slow transfer of learned U → U_target
-            dU_target = self.sleep_rate * (state.U - state.U_target)
-            state.U_target = state.U_target + dU_target
-
-            # Per-batch normalization (homeostasis)
-            U_target_norm = state.U_target.norm(dim=(1, 2), keepdim=True)
-            scale = (self.target_norm / (U_target_norm + 1e-6)).clamp(max=1.5)
-            state.U_target = state.U_target * scale
+        dU_target = self.sleep_rate * (state.U - state.U_target)
+        U_target_new = state.U_target + sleep_gate * dU_target
+        U_target_norm = U_target_new.norm(dim=(1, 2), keepdim=True)
+        scale = (self.target_norm / (U_target_norm + 1e-6)).clamp(max=1.5)
+        state.U_target = U_target_new * scale
 
         state.h = h_new
 
