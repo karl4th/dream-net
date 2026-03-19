@@ -489,7 +489,7 @@ def main():
 
     # ── Header ────────────────────────────────────────────────────────────
     print(f"\n{'═'*60}")
-    print(f"  DREAM Acoustic  |  {args.layers}L × {DREAM_H2}  |  device={device}")
+    print(f"  DREAM Acoustic  |  {args.layers}L × {args.hidden}  |  device={device}")
     print(f"  dataset: {DATASET_DIR}")
     print(f"  save:    {save_path}")
     print(f"{'═'*60}")
@@ -510,7 +510,7 @@ def main():
           f"[{' '.join(ex[2][:6])} ...]")
 
     # ── Model ─────────────────────────────────────────────────────────────
-    model = build_model(args.layers).to(device)
+    model = build_model(args.layers, args.hidden).to(device)
     n_p   = sum(p.numel() for p in model.parameters())
     layer_ps = [sum(p.numel() for p in c.parameters()) for c in model.cells]
     print(f"\n  params={n_p:,}  layers=[{', '.join(str(p) for p in layer_ps)}]  "
