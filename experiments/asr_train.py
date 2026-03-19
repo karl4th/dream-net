@@ -473,6 +473,7 @@ def main():
     parser.add_argument("--save",     type=str,   default="",     help="Save path for weights (auto if empty)")
     parser.add_argument("--load",       type=str,   default="",  help="Resume from checkpoint")
     parser.add_argument("--max_frames", type=int,   default=400, help="Max frames per crop window during training (0=full, default: 400)")
+    parser.add_argument("--hidden", type=int, default=256, help="Hidden size of the model (default: 256)")
     args = parser.parse_args()
 
     # ── Device ────────────────────────────────────────────────────────────
