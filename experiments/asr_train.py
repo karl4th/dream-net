@@ -323,13 +323,13 @@ def build_model(n_layers: int, H2: int = DREAM_H2) -> DREAMAcousticNL:
 
 def train(model: DREAMAcousticNL, dataset: list, epochs: int,
           steps_per_epoch: int, lr: float, device: torch.device,
-          save_path: str, max_frames: int = 0) -> float:
+          save_path: str, max_frames: int = 0, batch_size: int = 512) -> float:
 
     if not dataset:
         print("  [error] dataset is empty — check paths")
         return 1.0
 
-    # build padded batch on GPU (full sequences, used for random crop each step)
+    # build padded batch on CPU — mini-batches are moved to GPU per step
     feats_list  = [d[0] for d in dataset]
     labels_list = [d[1] for d in dataset]
     T_full = max(f.shape[0] for f in feats_list)
@@ -343,13 +343,12 @@ def train(model: DREAMAcousticNL, dataset: list, epochs: int,
         feats_full[i, :T]  = f
         labels_full[i, :T] = l
         lengths[i]         = T
-
-    feats_full  = feats_full.to(device)
-    labels_full = labels_full.to(device)
+    # feats_full / labels_full stay on CPU
 
     # crop window per step: limits Python loop length → higher GPU-Util
     crop = max_frames if max_frames > 0 else T_full
     crop = min(crop, T_full)
+    mb   = min(batch_size, B)
 
     opt   = torch.optim.Adam(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs, eta_min=1e-5)
@@ -358,7 +357,7 @@ def train(model: DREAMAcousticNL, dataset: list, epochs: int,
 
     crop_info = f"crop={crop}" if max_frames > 0 else f"T_max={T_full}"
     print(f"\nTraining {n_p:,} params | {B} files | T_full={T_full} | {crop_info} | "
-          f"{epochs} epochs × {steps_per_epoch} steps | device={device}")
+          f"batch={mb} | {epochs} epochs × {steps_per_epoch} steps | device={device}")
     print(f"{'─'*60}\n")
 
     import time
@@ -369,26 +368,27 @@ def train(model: DREAMAcousticNL, dataset: list, epochs: int,
         last_loss = 0.0
 
         for _ in range(steps_per_epoch):
-            # random crop: each step sees a different window → better coverage
+            # random crop window
             if max_frames > 0 and T_full > crop:
                 t0 = torch.randint(0, T_full - crop + 1, (1,)).item()
             else:
                 t0 = 0
             t1 = t0 + crop
 
-            feats_crop  = feats_full[:, t0:t1, :]    # (B, crop, N_MELS)
-            labels_crop = labels_full[:, t0:t1]       # (B, crop)
+            # random mini-batch: sample mb files, move slice to GPU
+            idx          = torch.randperm(B)[:mb]
+            feats_batch  = feats_full[idx, t0:t1, :].to(device)   # (mb, crop, N_MELS)
+            labels_batch = labels_full[idx, t0:t1].to(device)      # (mb, crop)
+            lens_batch   = lengths[idx]
 
-            # mask: frames that actually belong to each file in this window
-            mask = torch.zeros(B, crop, dtype=torch.bool, device=device)
-            for i in range(B):
-                valid_end = min(int(lengths[i].item()) - t0, crop)
-                if valid_end > 0:
-                    mask[i, :valid_end] = True
+            # vectorized mask
+            valid_ends = (lens_batch - t0).clamp(min=0, max=crop)  # (mb,)
+            mask = (torch.arange(crop, device=device).unsqueeze(0)
+                    < valid_ends.unsqueeze(1).to(device))           # (mb, crop)
 
-            logits      = model.forward_files(feats_crop)    # (B, crop, N_CLS)
+            logits      = model.forward_files(feats_batch)          # (mb, crop, N_CLS)
             flat_logits = logits[mask]
-            flat_labels = labels_crop[mask]
+            flat_labels = labels_batch[mask]
             loss        = F.cross_entropy(flat_logits, flat_labels)
 
             opt.zero_grad()
@@ -402,7 +402,7 @@ def train(model: DREAMAcousticNL, dataset: list, epochs: int,
         if (ep + 1) % 5 == 0:
             block_sec  = time.time() - block_start
             epoch_sec  = block_sec / 5
-            mean_per   = evaluate(model, dataset, device, quiet=True)
+            mean_per   = evaluate(model, dataset, device, quiet=True, batch_size=mb)
             marker     = " ←best" if mean_per < best_per else ""
             print(f"  epoch {ep+1:3d}/{epochs}  "
                   f"ce={last_loss:.4f}  PER={mean_per*100:.1f}%  "
@@ -424,33 +424,35 @@ def train(model: DREAMAcousticNL, dataset: list, epochs: int,
 # ---------------------------------------------------------------------------
 
 def evaluate(model: DREAMAcousticNL, dataset: list, device: torch.device,
-             verbose: bool = False, quiet: bool = False) -> float:
-    """Batched eval: runs forward_files on the whole dataset at once (B > 1)."""
+             verbose: bool = False, quiet: bool = False, batch_size: int = 512) -> float:
+    """Chunked eval: processes dataset in mini-batches to limit GPU memory."""
     model.eval()
 
     feats_list = [d[0] for d in dataset]
     refs       = [d[2] for d in dataset]
     B          = len(dataset)
     T_max      = max(f.shape[0] for f in feats_list)
-
-    feats_pad = torch.zeros(B, T_max, N_MELS, device=device)
-    lengths   = []
-    for i, f in enumerate(feats_list):
-        T = f.shape[0]
-        feats_pad[i, :T] = f.to(device)
-        lengths.append(T)
-
-    with torch.no_grad():
-        logits = model.forward_files(feats_pad)   # (B, T_max, N_CLS)
+    lengths    = [f.shape[0] for f in feats_list]
 
     scores = []
-    for i, (ref, T) in enumerate(zip(refs, lengths)):
-        pred = decode_phones(logits[i, :T])
-        scores.append(per(pred, ref))
-        if verbose:
-            print(f"  REF : {' '.join(ref[:15])} ...")
-            print(f"  PRED: {' '.join(pred[:15])} ...")
-            print(f"  PER : {scores[-1]:.3f}\n")
+    for start in range(0, B, batch_size):
+        end      = min(start + batch_size, B)
+        chunk_B  = end - start
+
+        feats_pad = torch.zeros(chunk_B, T_max, N_MELS, device=device)
+        for i, f in enumerate(feats_list[start:end]):
+            feats_pad[i, :f.shape[0]] = f.to(device)
+
+        with torch.no_grad():
+            logits = model.forward_files(feats_pad)   # (chunk_B, T_max, N_CLS)
+
+        for i, (ref, T) in enumerate(zip(refs[start:end], lengths[start:end])):
+            pred = decode_phones(logits[i, :T])
+            scores.append(per(pred, ref))
+            if verbose:
+                print(f"  REF : {' '.join(ref[:15])} ...")
+                print(f"  PRED: {' '.join(pred[:15])} ...")
+                print(f"  PER : {scores[-1]:.3f}\n")
 
     mean = float(np.mean(scores))
     if not quiet:
@@ -464,16 +466,17 @@ def evaluate(model: DREAMAcousticNL, dataset: list, device: torch.device,
 
 def main():
     parser = argparse.ArgumentParser(description="DREAM Acoustic Model — GPU training")
-    parser.add_argument("--layers",   type=int,   default=2,      help="Number of DREAM layers (default: 2)")
-    parser.add_argument("--n_files",  type=int,   default=100,    help="Training files to load (default: 100)")
-    parser.add_argument("--epochs",   type=int,   default=100,    help="Training epochs (default: 100)")
-    parser.add_argument("--steps",    type=int,   default=10,     help="Gradient steps per epoch (default: 10)")
-    parser.add_argument("--lr",       type=float, default=3e-3,   help="Learning rate (default: 3e-3)")
-    parser.add_argument("--device",   type=str,   default="auto", help="Device: auto/cpu/cuda/cuda:0 (default: auto)")
-    parser.add_argument("--save",     type=str,   default="",     help="Save path for weights (auto if empty)")
-    parser.add_argument("--load",       type=str,   default="",  help="Resume from checkpoint")
-    parser.add_argument("--max_frames", type=int,   default=400, help="Max frames per crop window during training (0=full, default: 400)")
-    parser.add_argument("--hidden", type=int, default=256, help="Hidden size of the model (default: 256)")
+    parser.add_argument("--layers",     type=int,   default=2,      help="Number of DREAM layers (default: 2)")
+    parser.add_argument("--n_files",    type=int,   default=100,    help="Training files to load (default: 100)")
+    parser.add_argument("--epochs",     type=int,   default=100,    help="Training epochs (default: 100)")
+    parser.add_argument("--steps",      type=int,   default=0,      help="Gradient steps per epoch (0=auto: n_files//batch_size)")
+    parser.add_argument("--lr",         type=float, default=3e-3,   help="Learning rate (default: 3e-3)")
+    parser.add_argument("--device",     type=str,   default="auto", help="Device: auto/cpu/cuda/cuda:0 (default: auto)")
+    parser.add_argument("--save",       type=str,   default="",     help="Save path for weights (auto if empty)")
+    parser.add_argument("--load",       type=str,   default="",     help="Resume from checkpoint")
+    parser.add_argument("--max_frames", type=int,   default=400,    help="Max frames per crop window during training (0=full, default: 400)")
+    parser.add_argument("--hidden",     type=int,   default=256,    help="Hidden size of the model (default: 256)")
+    parser.add_argument("--batch_size", type=int,   default=512,    help="Mini-batch size per step (default: 512)")
     args = parser.parse_args()
 
     # ── Device ────────────────────────────────────────────────────────────
@@ -520,20 +523,23 @@ def main():
         model.load_state_dict(torch.load(args.load, weights_only=True, map_location=device))
         print(f"  Resumed from: {args.load}")
 
+    # ── Steps auto-scale ──────────────────────────────────────────────────
+    steps = args.steps if args.steps > 0 else max(50, args.n_files // args.batch_size)
+
     # ── Train ─────────────────────────────────────────────────────────────
-    train(model, dataset, args.epochs, args.steps, args.lr, device, save_path,
-          max_frames=args.max_frames)
+    train(model, dataset, args.epochs, steps, args.lr, device, save_path,
+          max_frames=args.max_frames, batch_size=args.batch_size)
 
     # ── Final eval ────────────────────────────────────────────────────────
     print(f"{'═'*60}")
     print(f"  FINAL  —  {len(dataset)} files")
     print(f"{'═'*60}")
-    evaluate(model, dataset, device)
+    evaluate(model, dataset, device, batch_size=args.batch_size)
 
     print(f"\n{'═'*60}")
     print(f"  SAMPLE PREDICTIONS — first 3 files")
     print(f"{'═'*60}")
-    evaluate(model, dataset[:3], device, verbose=True, quiet=True)
+    evaluate(model, dataset[:3], device, verbose=True, quiet=True, batch_size=args.batch_size)
 
     print("Done.")
 
