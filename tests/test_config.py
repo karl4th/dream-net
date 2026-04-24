@@ -1,6 +1,5 @@
 """Tests for DREAMConfig."""
 
-import pytest
 from dream_net.core.config import DREAMConfig
 
 
@@ -8,12 +7,12 @@ def test_config_defaults():
     """Test default configuration values."""
     config = DREAMConfig()
 
-    assert config.input_dim == 39
+    assert config.input_dim == 80
     assert config.hidden_dim == 256
-    assert config.rank == 16
+    assert config.rank == 8
     assert config.time_step == 0.1
-    assert config.forgetting_rate == 0.01
-    assert config.base_plasticity == 0.1
+    assert config.forgetting_rate == 0.03
+    assert config.base_plasticity == 0.4
 
 
 def test_config_custom():

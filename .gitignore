@@ -7,6 +7,9 @@ wheels/
 *.egg-info/
 .eggs/
 *.so
+.claude
+.mypy_cache
+.ruff_cache
 
 # Virtual environments
 .venv/
@@ -73,3 +76,5 @@ docs/.doctrees/
 
 # Citation
 CITATION.cff
+
+reports/

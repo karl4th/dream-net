@@ -1,9 +1,10 @@
 """DREAM Cell: Dynamic Recall and Elastic Adaptive Memory."""
 
 import math
+
 import torch
 import torch.nn as nn
-from typing import Tuple, Optional
+
 from dream_net.core.config import DREAMConfig
 from dream_net.core.state import DREAMState
 
@@ -11,35 +12,35 @@ from dream_net.core.state import DREAMState
 class DREAMCell(nn.Module):
     """
     DREAM (Dynamic Recall and Elastic Adaptive Memory) cell.
-    
+
     A continuous-time RNN cell with:
     - Predictive coding with fast weights
     - Surprise-driven plasticity (Hebbian learning)
     - Liquid Time-Constants (LTC) for adaptive integration
     - Sleep consolidation for memory stabilization
-    
+
     This is the core building block. Use it like any PyTorch RNN cell:
-    
+
     Examples
     --------
     >>> from dream import DREAMConfig, DREAMCell
     >>> config = DREAMConfig(input_dim=39, hidden_dim=256)
     >>> cell = DREAMCell(config)
-    
+
     >>> # Process sequence
     >>> state = cell.init_state(batch_size=32)
     >>> for t in range(sequence_length):
     ...     x = input_seq[:, t, :]  # (batch, input_dim)
     ...     h, state = cell(x, state)
-    
+
     >>> # Or process full sequence at once
     >>> output, state = cell.forward_sequence(input_seq)
-    
+
     Parameters
     ----------
     config : DREAMConfig
         Model configuration
-    
+
     Attributes
     ----------
     config : DREAMConfig
@@ -56,21 +57,19 @@ class DREAMCell(nn.Module):
         Plasticity coefficient for Hebbian learning
     tau_sys : nn.Parameter
         Base time constant for LTC
-    classifier : nn.Linear
-        Optional classifier head for downstream tasks
     """
-    
+
     def __init__(self, config: DREAMConfig):
         super().__init__()
         self.config = config
-        
+
         # ================================================================
         # BLOCK 1: Predictive Coding
         # ================================================================
         self.C = nn.Parameter(torch.randn(config.input_dim, config.hidden_dim))
         self.W = nn.Parameter(torch.randn(config.hidden_dim, config.input_dim))
         self.B = nn.Parameter(torch.randn(config.hidden_dim, config.input_dim))
-        
+
         # ================================================================
         # BLOCK 2: Fast Weights (Low-rank decomposition)
         # ================================================================
@@ -78,14 +77,14 @@ class DREAMCell(nn.Module):
         V_init = torch.randn(config.input_dim, config.rank)
         U_svd, _, Vh_svd = torch.linalg.svd(V_init, full_matrices=False)
         self.register_buffer('V', U_svd @ Vh_svd)
-        
+
         self.eta = nn.Parameter(torch.tensor(config.base_plasticity))
-        
+
         # ================================================================
         # BLOCK 3: Surprise Gate
         # ================================================================
         # Note: adaptive_tau is now part of DREAMState, not a buffer
-        
+
         # ================================================================
         # BLOCK 4: Liquid Time-Constant (LTC)
         # ================================================================
@@ -97,7 +96,7 @@ class DREAMCell(nn.Module):
         # Learnable surprise scale for adaptive LTC (stored in log-space: exp(param) = scale)
         # init = log(ltc_surprise_scale) so that exp(param) starts at the configured value
         self.ltc_surprise_scale = nn.Parameter(torch.tensor(math.log(max(config.ltc_surprise_scale, 1e-6))))
-        
+
         # ================================================================
         # Parameters
         # ================================================================
@@ -111,41 +110,37 @@ class DREAMCell(nn.Module):
         self.target_norm = config.target_norm
         self.sleep_rate = config.sleep_rate
         self.S_min = config.min_surprise_for_sleep
-        
+
         # Initialize weights
         self._init_weights()
-    
+
     def _init_weights(self) -> None:
         """
         Initialize weights using Xavier/Kaiming initialization.
-        
+
         Called automatically in __init__. Can be called manually to reset.
         """
         # Xavier initialization for predictive coding matrices
         nn.init.xavier_uniform_(self.C)
         nn.init.xavier_uniform_(self.W)
         nn.init.xavier_uniform_(self.B)
-        
+
         # Ensure C[0, :] is positive (stability constraint)
         with torch.no_grad():
             self.C[0, :] = torch.abs(self.C[0, :])
-        
+
         # V is already initialized with SVD
-        
-        # Small initialization for classifier if present
-        if hasattr(self, 'classifier') and self.classifier is not None:
-            nn.init.xavier_uniform_(self.classifier.weight)
-            nn.init.zeros_(self.classifier.bias)
-    
+
+
     def init_state(
         self,
         batch_size: int = 1,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None
     ) -> DREAMState:
         """
         Initialize cell state.
-        
+
         Parameters
         ----------
         batch_size : int
@@ -154,7 +149,7 @@ class DREAMCell(nn.Module):
             Device for tensors
         dtype : torch.dtype, optional
             Data type for tensors
-            
+
         Returns
         -------
         DREAMState
@@ -163,13 +158,13 @@ class DREAMCell(nn.Module):
         return DREAMState.init_from_config(
             self.config, batch_size, device, dtype
         )
-    
+
     def surprise_gate(
         self,
-        error: torch.Tensor,
         error_norm: torch.Tensor,
-        state: DREAMState
-    ) -> torch.Tensor:
+        adaptive_tau: torch.Tensor,
+        error_var_mean: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute surprise with habituation (adaptive threshold).
 
@@ -179,53 +174,52 @@ class DREAMCell(nn.Module):
 
         Parameters
         ----------
-        error : torch.Tensor
-            Prediction error (batch, input_dim)
         error_norm : torch.Tensor
-            Norm of error (batch,)
-        state : DREAMState
-            Current state containing error_var and adaptive_tau
+            Norm of error normalized by input scale (batch,)
+        adaptive_tau : torch.Tensor
+            Current adaptive threshold (batch,)
+        error_var_mean : torch.Tensor
+            Mean of error variance across input dim (batch,)
 
         Returns
         -------
-        torch.Tensor
+        surprise : torch.Tensor
             Surprise values (batch,)
+        new_adaptive_tau : torch.Tensor
+            Updated adaptive threshold (batch,)
         """
         # Classical entropy from error variance
         eps = 1e-6
-        entropy = 0.5 * torch.log(2 * torch.pi * torch.e * (state.error_var.mean(dim=-1) + eps))
+        entropy = 0.5 * torch.log(2 * torch.pi * torch.e * (error_var_mean + eps))
         entropy = torch.clamp(entropy, 0.0, 2.0)
 
         # HABITUATION: Adaptive threshold with slow adaptation
         habituation_rate = 0.001
         new_adaptive_tau = (
-            (1 - habituation_rate) * state.adaptive_tau +
+            (1 - habituation_rate) * adaptive_tau +
             habituation_rate * error_norm
         )
         # Clamp to prevent "deafness"
         new_adaptive_tau = torch.clamp(new_adaptive_tau, max=0.8)
 
-        # Update state
-        state.adaptive_tau = new_adaptive_tau
-
         # Final threshold = classical + adaptive
         classical_tau = self.tau_0 * (1 + self.alpha * entropy)
-        effective_tau = 0.3 * classical_tau + 0.7 * state.adaptive_tau
+        effective_tau = 0.3 * classical_tau + 0.7 * new_adaptive_tau
 
         # Compute surprise
         surprise = torch.sigmoid((error_norm - effective_tau) / self.gamma)
 
-        return surprise
-    
+        return surprise, new_adaptive_tau
+
     def update_fast_weights(
         self,
         h_prev: torch.Tensor,
         error: torch.Tensor,
         surprise: torch.Tensor,
         state: DREAMState
-    ) -> None:
+    ) -> torch.Tensor:
         """
-        Update fast weights U via Hebbian learning with surprise modulation.
+        Compute updated fast weights U via Hebbian learning with surprise modulation.
 
         Each batch element has its own U matrix for independent adaptation.
         Uses efficient batch operations via torch.bmm.
@@ -239,7 +233,12 @@ class DREAMCell(nn.Module):
         surprise : torch.Tensor
             Surprise values (batch,)
         state : DREAMState
-            Current state (U and U_target are updated in-place)
+            Current state (read-only — not mutated)
+
+        Returns
+        -------
+        torch.Tensor
+            New U tensor (batch, hidden_dim, rank)
         """
         batch_size = h_prev.shape[0]
 
@@ -250,7 +249,7 @@ class DREAMCell(nn.Module):
         outer_product = h_outer @ error_outer  # (batch, hidden, input)
 
         # Project onto shared V: (batch, hidden, input) @ (input, rank) = (batch, hidden, rank)
-        hebbian = outer_product @ self.V.unsqueeze(0).expand(batch_size, -1, -1)
+        hebbian = outer_product @ self.V.unsqueeze(0).expand(batch_size, -1, -1)  # type: ignore[operator]
 
         # Adaptive forgetting: λ_eff = λ × (1 + k × S_t)
         # High surprise → stale patterns cleared faster before new ones are written
@@ -266,12 +265,9 @@ class DREAMCell(nn.Module):
 
         # Per-batch normalization to target norm
         U_norm = U_new.norm(dim=(1, 2), keepdim=True)  # (batch, 1, 1)
-        scale = (self.target_norm / (U_norm + 1e-6)).clamp(max=1.5)  # Allow some overshoot
-        U_new = U_new * scale
+        scale = (self.target_norm / (U_norm + 1e-6)).clamp(max=1.5)
+        return U_new * scale
 
-        # Update state
-        state.U = U_new
-    
     def compute_ltc_update(
         self,
         h_prev: torch.Tensor,
@@ -280,10 +276,10 @@ class DREAMCell(nn.Module):
     ) -> torch.Tensor:
         """
         Compute hidden state update with Liquid Time-Constant.
-        
+
         Uses Euler method for continuous-time dynamics:
         dh/dt = (-h + h_target) / tau
-        
+
         With stabilized tau clamping to prevent numerical instability.
 
         Parameters
@@ -294,7 +290,7 @@ class DREAMCell(nn.Module):
             Combined input effects (batch, hidden_dim)
         surprise : torch.Tensor
             Surprise values (batch,)
-            
+
         Returns
         -------
         torch.Tensor
@@ -304,72 +300,77 @@ class DREAMCell(nn.Module):
             # LTC disabled: classic update
             h_target = torch.tanh(input_effect)
             return h_target * 0.95 + h_prev * 0.05
-        
+
         # Dynamic time constant: tau = tau_sys / (1 + surprise * scale)
         # High surprise → small tau → fast updates
         # Low surprise → large tau → slow integration
-        # Using learnable ltc_surprise_scale
-        tau_dynamic = self.tau_sys / (1.0 + surprise * self.ltc_surprise_scale.exp())  # (batch,)
-        
+        # Using learnable ltc_surprise_scale (stored in log-space)
+        surprise_scale = self.ltc_surprise_scale.exp()
+        tau_dynamic = self.tau_sys / (1.0 + surprise * surprise_scale)  # (batch,)
+
         # Stabilized clamping to prevent numerical issues
         tau_effective = tau_dynamic.clamp(self.min_tau, self.max_tau)  # (batch,)
-        
+
         # Compute h_target (where system wants to go)
         h_target = torch.tanh(input_effect)  # (batch, hidden)
-        
-        # Time-step normalized by tau with broadcasting
-        # dt_over_tau should be (batch, 1) for proper broadcasting
-        dt_over_tau = self.config.time_step / (tau_effective.unsqueeze(1) + self.config.time_step)  # (batch, 1)
-        dt_over_tau = dt_over_tau.clamp(0.01, 0.5)  # Stability
-        
-        # LTC update: h_new = (1 - dt/tau) * h_prev + (dt/tau) * h_target
-        h_new = (1 - dt_over_tau) * h_prev + dt_over_tau * h_target
-        
+
+        # ZOH-style blend factor: alpha = dt/(tau+dt), not dt/tau
+        alpha = self.config.time_step / (tau_effective.unsqueeze(1) + self.config.time_step)  # (batch, 1)
+        alpha = alpha.clamp(0.01, 0.5)
+
+        # LTC update: h_new = (1 - alpha) * h_prev + alpha * h_target
+        h_new = (1 - alpha) * h_prev + alpha * h_target
+
         return h_new
-    
+
     def forward(
         self,
         x: torch.Tensor,
         state: DREAMState
-    ) -> Tuple[torch.Tensor, DREAMState]:
+    ) -> tuple[torch.Tensor, DREAMState]:
         """
         Forward pass of DREAM cell.
-        
+
         Parameters
         ----------
         x : torch.Tensor
             Input tensor (batch, input_dim)
         state : DREAMState
             Current state
-            
+
         Returns
         -------
         h_new : torch.Tensor
             New hidden state (batch, hidden_dim)
-        state : DREAMState
-            Updated state
+        new_state : DREAMState
+            New state (input state is not modified)
         """
         batch_size = x.shape[0]
-        
+
+        if batch_size != state.h.shape[0]:
+            raise ValueError(
+                f"Batch size mismatch: x has {batch_size}, "
+                f"state has {state.h.shape[0]}"
+            )
+
         # ================================================================
         # Normalization
         # ================================================================
         x_norm = x / (x.norm(dim=-1, keepdim=True) + 1e-6)
-        x_norm = torch.clamp(x_norm, -1.0, 1.0)  # keep sign — critical for log-mel
-        
+        x_norm = torch.clamp(x_norm, -1.0, 1.0)
+
         # ================================================================
         # Dynamic Prediction — FAST WEIGHTS DISABLED
         # ================================================================
-        # Using pure predictive coding without fast weights
-        # Fast weights were corrupting the learned C matrix
-        # Rely on LTC + surprise gate for adaptation instead
+        # Fast weights were corrupting the learned C matrix.
+        # Rely on LTC + surprise gate for adaptation instead.
 
         # Base prediction: x_pred = tanh(h @ C.T)  shape: (batch, input_dim)
         x_pred_raw = state.h @ self.C.T
 
         # Apply activation and scale
         x_pred = torch.tanh(x_pred_raw) * x.norm(dim=-1, keepdim=True)
-        
+
         # ================================================================
         # Error Computation
         # ================================================================
@@ -377,83 +378,83 @@ class DREAMCell(nn.Module):
         error_norm = error.norm(dim=-1)  # (batch,)
 
         # Normalise error by input scale → surprise in [0,1] regardless of
-        # input amplitude or dimension.  Without this, for dim=80 the raw
-        # error_norm >> threshold always, surprise ≡ 1, gate never closes.
+        # input amplitude or dimension.
         x_scale = x.norm(dim=-1) + 1e-6
-        rel_error_norm = error_norm / x_scale  # ∈ [0, ~2], 0 = perfect pred
+        rel_error_norm = error_norm / x_scale
 
         # ================================================================
-        # Surprise Gate
+        # Surprise Gate (pure function — no state mutation)
         # ================================================================
-        surprise = self.surprise_gate(error, rel_error_norm, state)
+        error_var_mean = state.error_var.mean(dim=-1)
+        surprise, new_adaptive_tau = self.surprise_gate(
+            rel_error_norm, state.adaptive_tau, error_var_mean
+        )
 
         # ================================================================
         # Fast Weights Update — DISABLED
         # ================================================================
-        # Fast weights were causing degradation by memorizing wrong patterns
-        pass
 
         # ================================================================
         # State Update with LTC — simplified without fast weights
         # ================================================================
-        # Only use base effect and error effect (no fast_effect)
-        U_batch = state.U  # (batch, hidden, rank) - kept for compatibility
-
         base_effect = self.B @ x_norm.T
         base_effect = base_effect.T  # (batch, hidden)
-        
+
         error_effect = self.W @ error.T
         error_effect = error_effect.T  # (batch, hidden)
 
-        # Combine effects: high surprise → error is informative → inject more
-        # High surprise = large prediction error = error signal carries real information
+        # Combine effects using configurable mixing coefficients
         input_effect = (
-            state.h * 0.7 +
-            base_effect * 0.2 +
-            error_effect * surprise.unsqueeze(1) * 0.3
+            state.h * self.config.hidden_mixing +
+            base_effect * self.config.input_mixing +
+            error_effect * surprise.unsqueeze(1) * self.config.error_mixing
         )
 
-        # LTC update (already performs weighted interpolation internally)
+        # LTC update
         h_new = self.compute_ltc_update(state.h, input_effect, surprise)
 
         # ================================================================
-        # Update Statistics
+        # Update Statistics (Welford-correct EMA)
         # ================================================================
-        alpha = 0.05
-        state.error_mean = (1 - alpha) * state.error_mean + alpha * error
-        state.error_var = (1 - alpha) * state.error_var + alpha * (error - state.error_mean) ** 2
-        state.avg_surprise = (1 - self.beta_s) * state.avg_surprise + self.beta_s * surprise
+        # Update error_mean first, then compute variance against the
+        # *previous* mean to avoid bias.
+        new_error_mean = (1 - self.beta) * state.error_mean + self.beta * error
+        new_error_var = (
+            (1 - self.beta) * state.error_var
+            + self.beta * (error - state.error_mean) ** 2
+        )
+        new_avg_surprise = (1 - self.beta_s) * state.avg_surprise + self.beta_s * surprise
 
         # ================================================================
-        # Sleep Consolidation
+        # Sleep Consolidation: low surprise → slowly transfer U → U_target
         # ================================================================
-        # Consolidate during calm periods (low surprise = rest/sleep state)
-        # Transfers accumulated fast weights U → long-term U_target
-        avg_surprise_mean = state.avg_surprise.mean()
+        sleep_mask = (new_avg_surprise < self.S_min).float().view(-1, 1, 1)
+        new_U_target = state.U_target + self.sleep_rate * sleep_mask * (state.U - state.U_target)
 
-        if avg_surprise_mean < self.S_min:
-            # Per-batch U_target update: slow transfer of learned U → U_target
-            dU_target = self.sleep_rate * (state.U - state.U_target)
-            state.U_target = state.U_target + dU_target
+        # ================================================================
+        # Construct new state (no in-place mutation of input state)
+        # ================================================================
+        new_state = DREAMState(
+            h=h_new,
+            U=state.U,
+            U_target=new_U_target,
+            adaptive_tau=new_adaptive_tau,
+            error_mean=new_error_mean,
+            error_var=new_error_var,
+            avg_surprise=new_avg_surprise,
+        )
 
-            # Per-batch normalization (homeostasis)
-            U_target_norm = state.U_target.norm(dim=(1, 2), keepdim=True)
-            scale = (self.target_norm / (U_target_norm + 1e-6)).clamp(max=1.5)
-            state.U_target = state.U_target * scale
+        return h_new, new_state
 
-        state.h = h_new
-
-        return h_new, state
-    
     def forward_sequence(
         self,
         x_seq: torch.Tensor,
-        state: Optional[DREAMState] = None,
+        state: DREAMState | None = None,
         return_all: bool = False
-    ) -> Tuple[torch.Tensor, DREAMState]:
+    ) -> tuple[torch.Tensor, DREAMState]:
         """
         Process a full sequence through the cell.
-        
+
         Parameters
         ----------
         x_seq : torch.Tensor
@@ -462,7 +463,7 @@ class DREAMCell(nn.Module):
             Initial state. If None, initialized from config.
         return_all : bool, default=False
             If True, return all hidden states. Otherwise, return only final.
-            
+
         Returns
         -------
         output : torch.Tensor
@@ -472,23 +473,26 @@ class DREAMCell(nn.Module):
             Final state after processing sequence
         """
         batch_size, time_steps, _ = x_seq.shape
-        
+
         if state is None:
             state = self.init_state(batch_size, device=x_seq.device, dtype=x_seq.dtype)
-        
-        if return_all:
-            all_h = []
-        
+
+        all_h: list[torch.Tensor] = []
+        h = state.h
+
         for t in range(time_steps):
             x_t = x_seq[:, t, :]  # (batch, input_dim)
             h, state = self(x_t, state)
-            
+
             if return_all:
                 all_h.append(h.unsqueeze(1))
-        
+
         if return_all:
-            output = torch.cat(all_h, dim=1)  # (batch, time, hidden_dim)
+            if all_h:
+                output = torch.cat(all_h, dim=1)  # (batch, time, hidden_dim)
+            else:
+                output = h.unsqueeze(1)[:, :0, :]  # (batch, 0, hidden_dim)
         else:
-            output = h  # (batch, hidden_dim)
-        
+            output = h  # (batch, hidden_dim) — state.h if time_steps == 0
+
         return output, state

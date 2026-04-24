@@ -260,14 +260,12 @@ wheels = [
 ]
 
 [[package]]
-name = "dream-net"
+name = "dream-network"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
-    { name = "matplotlib" },
     { name = "torch" },
     { name = "torchaudio" },
-    { name = "torchcodec" },
 ]
 
 [package.optional-dependencies]
@@ -291,7 +289,6 @@ experiments = [
 
 [package.metadata]
 requires-dist = [
-    { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.10.0" },
     { name = "matplotlib", marker = "extra == 'experiments'", specifier = ">=3.10.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14.0" },
@@ -304,7 +301,6 @@ requires-dist = [
     { name = "sphinx-rtd-theme", marker = "extra == 'docs'", specifier = ">=3.0.0" },
     { name = "torch", specifier = ">=2.0.0" },
     { name = "torchaudio", specifier = ">=2.0.0" },
-    { name = "torchcodec", specifier = ">=0.10.0" },
     { name = "torchcodec", marker = "extra == 'experiments'", specifier = ">=0.10.0" },
 ]
 provides-extras = ["dev", "experiments", "docs"]

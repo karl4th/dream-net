@@ -2,9 +2,9 @@
 
 import pytest
 import torch
-from dream_net.core.config import DREAMConfig
+
 from dream_net.core.cell import DREAMCell
-from dream_net.core.state import DREAMState
+from dream_net.core.config import DREAMConfig
 
 
 def test_cell_init():
@@ -64,19 +64,23 @@ def test_cell_surprise_gate():
 
     error = torch.randn(4, 80)
     error_norm = error.norm(dim=-1)
+    error_var_mean = state.error_var.mean(dim=-1)
 
-    surprise = cell.surprise_gate(error, error_norm, state)
+    surprise, new_adaptive_tau = cell.surprise_gate(
+        error_norm, state.adaptive_tau, error_var_mean
+    )
 
     assert surprise.shape == (4,)
     assert (surprise >= 0).all()
     assert (surprise <= 1).all()
+    assert new_adaptive_tau.shape == (4,)
 
 
 def test_cell_ltc_update():
     """Test LTC state update."""
     config = DREAMConfig(input_dim=80, hidden_dim=256, rank=8)
     cell = DREAMCell(config)
-    state = cell.init_state(batch_size=4)
+    cell.init_state(batch_size=4)
 
     h_prev = torch.randn(4, 256)
     input_effect = torch.randn(4, 256)
@@ -90,7 +94,7 @@ def test_cell_ltc_update():
 
 
 def test_cell_fast_weights_update():
-    """Test fast weights Hebbian update."""
+    """Test fast weights Hebbian update returns new U without mutating state."""
     config = DREAMConfig(input_dim=80, hidden_dim=256, rank=8)
     cell = DREAMCell(config)
     state = cell.init_state(batch_size=4)
@@ -100,13 +104,15 @@ def test_cell_fast_weights_update():
     surprise = torch.rand(4)
 
     initial_U = state.U.clone()
-    cell.update_fast_weights(h_prev, error, surprise, state)
+    new_U = cell.update_fast_weights(h_prev, error, surprise, state)
 
-    # U should change
-    assert not torch.allclose(state.U, initial_U)
+    # Returned U should differ from initial zeros
+    assert not torch.allclose(new_U, initial_U)
+    # Input state must not be mutated
+    assert torch.equal(state.U, initial_U)
 
-    # U should be bounded (normalization)
-    u_norm = state.U.norm(dim=(1, 2))
+    # Returned U should be bounded (normalization)
+    u_norm = new_U.norm(dim=(1, 2))
     assert (u_norm <= config.target_norm * 1.5 + 1e-6).all()
 
 
@@ -140,3 +146,35 @@ def test_cell_device_cpu():
 
     assert h.device.type == "cpu"
     assert state.h.device.type == "cpu"
+
+
+def test_cell_batch_size_mismatch():
+    """Test that batch size mismatch raises ValueError."""
+    config = DREAMConfig(input_dim=80, hidden_dim=256, rank=8)
+    cell = DREAMCell(config)
+    state = cell.init_state(batch_size=4)
+
+    x = torch.randn(2, 80)  # batch=2, state has batch=4
+    with pytest.raises(ValueError, match="Batch size mismatch"):
+        cell(x, state)
+
+
+def test_cell_forward_no_input_mutation():
+    """Test that forward does not mutate the input state."""
+    config = DREAMConfig(input_dim=80, hidden_dim=256, rank=8)
+    cell = DREAMCell(config)
+    state = cell.init_state(batch_size=4)
+
+    original_h = state.h.clone()
+    original_adaptive_tau = state.adaptive_tau.clone()
+    original_error_mean = state.error_mean.clone()
+
+    x = torch.randn(4, 80)
+    _, new_state = cell(x, state)
+
+    # Input state should be unchanged
+    assert torch.equal(state.h, original_h)
+    assert torch.equal(state.adaptive_tau, original_adaptive_tau)
+    assert torch.equal(state.error_mean, original_error_mean)
+    # Returned state should differ
+    assert not torch.equal(new_state.h, original_h)

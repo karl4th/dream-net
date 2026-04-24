@@ -1,8 +1,8 @@
 """Tests for DREAM high-level API."""
 
-import pytest
 import torch
-from dream_net import DREAM, DREAMStack, DREAMConfig
+
+from dream_net import DREAM, DREAMStack
 
 
 def test_dream_init():
@@ -74,6 +74,21 @@ def test_dreamstack_dropout():
     output, states = model(x)
 
     assert output.shape == (4, 10, 128)
+
+
+def test_dreamstack_forward_no_sequences():
+    """Test DREAMStack with return_sequences=False doesn't crash on intermediate layers."""
+    model = DREAMStack(
+        input_dim=80,
+        hidden_dims=[256, 128],
+        rank=8,
+    )
+
+    x = torch.randn(4, 10, 80)
+    output, states = model(x, return_sequences=False)
+
+    assert output.shape == (4, 128)  # final timestep only from last layer
+    assert len(states) == 2
 
 
 def test_dream_init_state():

@@ -15,9 +15,9 @@ Example
 >>> output, state = model(x)
 """
 
+from dream_net.core.cell import DREAMCell
 from dream_net.core.config import DREAMConfig
 from dream_net.core.state import DREAMState
-from dream_net.core.cell import DREAMCell
 from dream_net.layers.layer import DREAM, DREAMStack
 from dream_net.utils.statistics import RunningStatistics
 
@@ -26,11 +26,11 @@ __all__ = [
     # Config & State
     "DREAMConfig",
     "DREAMState",
-    
+
     # Core
     "DREAMCell",
     "RunningStatistics",
-    
+
     # High-level API
     "DREAM",
     "DREAMStack",

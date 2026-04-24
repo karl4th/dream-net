@@ -7,136 +7,145 @@ from dataclasses import dataclass
 class DREAMConfig:
     """
     Configuration for DREAM (Dynamic Recall and Elastic Adaptive Memory) cell.
-    
+
     DREAM is a continuous-time RNN cell with surprise-driven plasticity
     and liquid time-constants for adaptive integration speeds.
-    
+
     Parameters
     ----------
-    input_dim : int, default=39
-        Dimension of input features. For ASR with MFCC: 39 (13 + 13Δ + 13ΔΔ).
-        
+    input_dim : int, default=80
+        Dimension of input features. For ASR with log-mel: 80 bands.
+
     hidden_dim : int, default=256
         Dimension of hidden state (d_state). Controls model capacity.
-        
-    rank : int, default=16
-        Rank of fast weights decomposition (r). Lower = more compression.
-        
+
+    rank : int, default=8
+        Rank of fast weights decomposition (r). Sweet spot from ablation.
+
     time_step : float, default=0.1
         Integration time step (dt) for continuous-time dynamics.
-        
-    forgetting_rate : float, default=0.01
+
+    forgetting_rate : float, default=0.03
         Lambda (λ) - forgetting/decay rate for fast weights.
         Higher = faster forgetting of old patterns.
-        
-    base_plasticity : float, default=0.1
+
+    base_plasticity : float, default=0.4
         Base plasticity coefficient for Hebbian learning.
-        
-    base_threshold : float, default=0.5
+
+    base_threshold : float, default=0.35
         Base surprise threshold (τ₀). Controls sensitivity to novelty.
         Lower = more sensitive to prediction errors.
-        
+
     entropy_influence : float, default=0.2
         Alpha (α) - entropy influence on surprise threshold.
         Higher = more uncertainty-aware threshold.
-        
-    surprise_temperature : float, default=0.1
+
+    surprise_temperature : float, default=0.12
         Gamma (γ) - surprise temperature/scaling parameter.
         Higher = smoother surprise curve.
-        
+
     error_smoothing : float, default=0.01
         Beta (β) - exponential smoothing coefficient for error statistics.
-        
+
     surprise_smoothing : float, default=0.01
         Beta_s - exponential smoothing for average surprise.
-        
+
     target_norm : float, default=2.0
         Target norm for fast weights (W_target). Prevents explosion.
-        
+
     kappa : float, default=0.5
         Homeostasis coefficient (κ) for weight normalization.
-        
+
     ltc_enabled : bool, default=True
         Enable Liquid Time-Constant dynamics. If False, uses classic update.
-        
-    ltc_tau_sys : float, default=10.0
+
+    ltc_tau_sys : float, default=5.0
         Base system time constant for LTC. Controls integration speed.
         Higher = slower integration (more memory), Lower = faster response.
-        
-    ltc_surprise_scale : float, default=10.0
+
+    ltc_surprise_scale : float, default=8.0
         Scaling factor for surprise modulation of tau.
         Higher = more dynamic time constant adaptation.
-        
+
     sleep_rate : float, default=0.005
         Sleep consolidation rate (ζ_sleep).
-        
-    min_surprise_for_sleep : float, default=0.2
+
+    min_surprise_for_sleep : float, default=0.25
         Minimum surprise threshold for sleep activation (S_min).
-        
+
+    hidden_mixing : float, default=0.7
+        Weight for previous hidden state in input_effect.
+
+    input_mixing : float, default=0.2
+        Weight for base (input-driven) effect in input_effect.
+
+    error_mixing : float, default=0.3
+        Weight for surprise-modulated error effect in input_effect.
+
     Examples
     --------
     >>> from dream import DREAMConfig, DREAMCell
     >>> config = DREAMConfig(input_dim=39, hidden_dim=256, rank=16)
     >>> cell = DREAMCell(config)
     """
-    
+
     # =====================================================================
     # Model Dimensions
     # =====================================================================
-    input_dim: int = 39
-    """Dimension of input features. For ASR: 39 = 13 MFCC + 13Δ + 13ΔΔ"""
-    
+    input_dim: int = 80
+    """Dimension of input features. For ASR with log-mel: 80 bands."""
+
     hidden_dim: int = 256
     """Dimension of hidden state (d_state)"""
-    
-    rank: int = 16
-    """Rank of fast weights decomposition (r)"""
-    
+
+    rank: int = 8
+    """Rank of fast weights decomposition (r). Sweet spot from ablation."""
+
     # =====================================================================
     # Time Parameters
     # =====================================================================
     time_step: float = 0.1
     """Integration time step (dt) for continuous-time dynamics"""
-    
+
     # =====================================================================
     # Plasticity Parameters
     # =====================================================================
-    forgetting_rate: float = 0.01
+    forgetting_rate: float = 0.03
     """Lambda (λ) - forgetting/decay rate for fast weights"""
 
-    base_plasticity: float = 0.1
+    base_plasticity: float = 0.4
     """Base plasticity coefficient for Hebbian learning"""
-    
+
     # =====================================================================
     # Surprise Parameters
     # =====================================================================
-    base_threshold: float = 0.5
+    base_threshold: float = 0.35
     """Base surprise threshold (τ₀) - controls sensitivity to novelty"""
 
     entropy_influence: float = 0.2
     """Alpha (α) - entropy influence on surprise threshold"""
 
-    surprise_temperature: float = 0.1
+    surprise_temperature: float = 0.12
     """Gamma (γ) - surprise temperature/scaling parameter"""
-    
+
     # =====================================================================
     # Smoothing Parameters
     # =====================================================================
     error_smoothing: float = 0.01
     """Beta (β) - exponential smoothing for error statistics"""
-    
+
     surprise_smoothing: float = 0.01
     """Beta_s - exponential smoothing for average surprise"""
-    
+
     # =====================================================================
     # Homeostasis Parameters
     # =====================================================================
     target_norm: float = 2.0
     """Target norm for fast weights (W_target)"""
-    
+
     kappa: float = 0.5
     """Homeostasis coefficient (κ) for weight normalization"""
-    
+
     # =====================================================================
     # Adaptive Forgetting
     # =====================================================================
@@ -150,18 +159,30 @@ class DREAMConfig:
     # =====================================================================
     sleep_rate: float = 0.005
     """Sleep consolidation rate (ζ_sleep)"""
-    
-    min_surprise_for_sleep: float = 0.2
+
+    min_surprise_for_sleep: float = 0.25
     """Minimum surprise threshold for sleep activation (S_min)"""
-    
+
     # =====================================================================
     # Liquid Time-Constant (LTC) Parameters
     # =====================================================================
     ltc_enabled: bool = True
     """Enable Liquid Time-Constant dynamics"""
 
-    ltc_tau_sys: float = 10.0
+    ltc_tau_sys: float = 5.0
     """Base system time constant for LTC"""
 
-    ltc_surprise_scale: float = 10.0
+    ltc_surprise_scale: float = 8.0
     """Scaling factor for surprise modulation of tau"""
+
+    # =====================================================================
+    # Input-effect Mixing Coefficients
+    # =====================================================================
+    hidden_mixing: float = 0.7
+    """Weight for previous hidden state in input_effect computation"""
+
+    input_mixing: float = 0.2
+    """Weight for base (input-driven) effect in input_effect computation"""
+
+    error_mixing: float = 0.3
+    """Weight for surprise-modulated error effect in input_effect computation"""
