@@ -20,6 +20,21 @@ from dream_net.core.config import DREAMConfig
 from dream_net.core.state import DREAMState
 from dream_net.layers.layer import DREAM, DREAMStack
 from dream_net.utils.statistics import RunningStatistics
+from dream_net.multimodal import (
+    MultimodalDREAM,
+    SensorEncoder,
+    IMUEncoder,
+    WheelEncoderSensor,
+    ActionEncoder,
+    TargetEncoder,
+    TimeSeriesEncoder,
+    VisualEncoder,
+    FusionLayer,
+    OutputHead,
+    TankDriveHead,
+    ContinuousHead,
+    ClassificationHead,
+)
 
 __version__ = "0.2.0"
 __all__ = [
@@ -34,4 +49,19 @@ __all__ = [
     # High-level API
     "DREAM",
     "DREAMStack",
+
+    # Multimodal
+    "MultimodalDREAM",
+    "SensorEncoder",
+    "IMUEncoder",
+    "WheelEncoderSensor",
+    "ActionEncoder",
+    "TargetEncoder",
+    "TimeSeriesEncoder",
+    "VisualEncoder",
+    "FusionLayer",
+    "OutputHead",
+    "TankDriveHead",
+    "ContinuousHead",
+    "ClassificationHead",
 ]

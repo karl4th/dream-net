@@ -1,0 +1,80 @@
+# DREAM-Operator v1 — reference config for tank robot experiment
+# ==============================================================
+# Hardware: camera + MPU-6050 (6-axis) + wheel encoders
+# Control:  differential drive  [track_left, track_right] ∈ [−1, 1]²
+# Sensor rate: 10 fps  →  time_step = 0.1
+
+# ── Sensor encoders ───────────────────────────────────────────────────────────
+encoders:
+  camera:
+    type: VisualEncoder
+    out_dim: 64
+  imu:
+    type: IMUEncoder
+    in_dim: 6          # MPU-6050: ax ay az gx gy gz
+    out_dim: 32
+  wheels:
+    type: WheelEncoderSensor
+    in_dim: 4          # v_left  v_right  pos_left  pos_right
+    out_dim: 16
+  prev_action:
+    type: ActionEncoder
+    action_dim: 2      # track_left  track_right
+    out_dim: 16
+  target:
+    type: TargetEncoder
+    in_dim: 2          # target_angle_error (rad)  target_distance (m)
+    out_dim: 16
+
+# ── Output head ───────────────────────────────────────────────────────────────
+head:
+  type: TankDriveHead
+  hidden_dim: 256
+
+# ── DREAM core  (mirrors proven_v1.yaml) ──────────────────────────────────────
+model:
+  input_dim: 144       # 64 + 32 + 16 + 16 + 16
+  hidden_dim: 256
+  rank: 8
+
+plasticity:
+  base_plasticity: 0.4
+  forgetting_rate: 0.03
+  adaptive_forgetting_scale: 8.0
+
+surprise:
+  base_threshold: 0.35
+  entropy_influence: 0.2
+  surprise_temperature: 0.12
+
+ltc:
+  ltc_enabled: true
+  ltc_tau_sys: 5.0
+  ltc_surprise_scale: 8.0
+
+integration:
+  time_step: 0.1
+
+smoothing:
+  error_smoothing: 0.01
+  surprise_smoothing: 0.01
+
+homeostasis:
+  target_norm: 2.0
+  kappa: 0.5
+
+sleep:
+  sleep_rate: 0.005
+  min_surprise_for_sleep: 0.25
+
+# ── Training protocol ─────────────────────────────────────────────────────────
+pretrain:
+  epochs: 30
+  lr: 3.0e-3
+  clip_grad: 1.0
+  seed: 42
+  fast_weights: false     # OFF during pre-train
+  unfreeze_encoder_epoch: 5  # CNN frozen for first 5 epochs
+
+inference:
+  fast_weights: true      # ON during deployment

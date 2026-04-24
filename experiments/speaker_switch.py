@@ -89,6 +89,40 @@ def make_features() -> tuple[torch.Tensor, torch.Tensor, int]:
     return feats_a, feats_ab, switch_frame
 
 
+def make_synthetic_features(
+    n_frames_each: int = 500,
+    n_mels: int = N_MELS,
+    seed: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """
+    Synthetic fallback when CommonVoice clips are not available.
+
+    Speaker A: slow low-frequency modulation (calm speaker).
+    Speaker B: fast high-frequency modulation (energetic speaker).
+    Both are deterministic, normalized to ~N(0,1) per feature.
+    """
+    rng = torch.Generator()
+    rng.manual_seed(seed)
+    t = torch.arange(n_frames_each, dtype=torch.float32)
+
+    def _speaker(freq_scale: float, noise_std: float) -> torch.Tensor:
+        # Base: n_mels sine waves with random phases and the given frequency
+        phases = torch.rand(n_mels, generator=rng) * 2 * torch.pi
+        freqs = torch.linspace(0.005, 0.05, n_mels) * freq_scale
+        # (n_frames, n_mels)
+        signal = torch.sin(t.unsqueeze(1) * freqs.unsqueeze(0) + phases.unsqueeze(0))
+        noise = torch.randn(n_frames_each, n_mels, generator=rng) * noise_std
+        raw = signal + noise
+        mu = raw.mean(0, keepdim=True)
+        std = raw.std(0, keepdim=True).clamp(min=1e-4)
+        return (raw - mu) / std
+
+    feats_a = _speaker(freq_scale=1.0, noise_std=0.15)   # slow, quiet
+    feats_b = _speaker(freq_scale=4.0, noise_std=0.40)   # fast, noisy
+    feats_ab = torch.cat([feats_a, feats_b], dim=0)
+    return feats_a, feats_ab, n_frames_each
+
+
 # ---------------------------------------------------------------------------
 # Cell with mode control
 # ---------------------------------------------------------------------------
@@ -99,6 +133,9 @@ class ExperimentCell(DREAMCell):
     def __init__(self, config: DREAMConfig, mode: Mode = "full"):
         super().__init__(config)
         self.mode = mode
+        # Sync fast_weights_enabled with mode so the base-class flag is consistent
+        if mode in ("full", "no_gate"):
+            self.enable_fast_weights()
 
     def forward_step(
         self,
@@ -118,7 +155,6 @@ class ExperimentCell(DREAMCell):
 
         # -- fast weight prediction correction (Ba et al. style) --------------
         # Retrieval: h @ U → (B, rank), then (B, rank) @ V.T → (B, input)
-        # Interpretation: "for this h, memory says prediction was off by ~this"
         if self.mode in ("full", "no_gate"):
             h_U = torch.bmm(state.h.unsqueeze(1), state.U).squeeze(1)  # (B, rank)
             pred_correction = (h_U @ self.V.T) * x_scale               # (B, input)
@@ -132,15 +168,21 @@ class ExperimentCell(DREAMCell):
         error_norm = error.norm(dim=-1)                         # (B,)
         rel_error_norm = (error_norm / x_scale.squeeze(1)).clamp(max=4.0)
 
-        # -- surprise gate -----------------------------------------------------
+        # -- surprise gate (correct signature: error_norm, adaptive_tau, error_var_mean)
         if self.mode == "no_gate":
             surprise = torch.ones(x.shape[0], device=x.device, dtype=x.dtype)
+            new_adaptive_tau = state.adaptive_tau
         else:
-            surprise = self.surprise_gate(error, rel_error_norm, state)
+            error_var_mean = state.error_var.mean(dim=-1)
+            surprise, new_adaptive_tau = self.surprise_gate(
+                rel_error_norm, state.adaptive_tau, error_var_mean
+            )
 
-        # -- fast weights update (store h → error association) ----------------
+        # -- fast weights update: capture returned U (no state mutation here) -
         if self.mode in ("full", "no_gate"):
-            self.update_fast_weights(state.h, error, surprise, state)
+            new_U = self.update_fast_weights(state.h, error, surprise, state)
+        else:
+            new_U = state.U
 
         # -- state update ------------------------------------------------------
         base_effect = (self.B @ x_norm.T).T                    # (B, hidden)
@@ -153,21 +195,31 @@ class ExperimentCell(DREAMCell):
         )
         h_new = self.compute_ltc_update(state.h, input_effect, surprise)
 
-        # -- statistics --------------------------------------------------------
+        # -- statistics (Welford-correct: variance uses old_mean) --------------
         a = 0.05
-        state.error_mean = (1 - a) * state.error_mean + a * error
-        state.error_var  = (1 - a) * state.error_var  + a * (error - state.error_mean) ** 2
-        state.avg_surprise = (1 - self.beta_s) * state.avg_surprise + self.beta_s * surprise
+        old_error_mean = state.error_mean
+        new_error_mean = (1 - a) * old_error_mean + a * error
+        new_error_var  = (1 - a) * state.error_var + a * (error - old_error_mean) ** 2
+        new_avg_surprise = (1 - self.beta_s) * state.avg_surprise + self.beta_s * surprise
 
-        # -- sleep (consolidate during calm) -----------------------------------
-        avg_s = state.avg_surprise.mean()
+        # -- sleep (consolidate during calm; use new_U so consolidation is current)
+        avg_s = new_avg_surprise.mean()
+        new_U_target = state.U_target
         if avg_s < self.S_min:
-            dU_t = self.sleep_rate * (state.U - state.U_target)
-            state.U_target = state.U_target + dU_t
-            nt = state.U_target.norm(dim=(1, 2), keepdim=True)
-            state.U_target = state.U_target * (self.target_norm / (nt + 1e-6)).clamp(max=1.5)
+            dU_t = self.sleep_rate * (new_U - state.U_target)
+            new_U_target = state.U_target + dU_t
+            nt = new_U_target.norm(dim=(1, 2), keepdim=True)
+            new_U_target = new_U_target * (self.target_norm / (nt + 1e-6)).clamp(max=1.5)
 
+        # -- write back into mutable state -------------------------------------
         state.h = h_new
+        state.U = new_U
+        state.U_target = new_U_target
+        state.adaptive_tau = new_adaptive_tau
+        state.error_mean = new_error_mean
+        state.error_var = new_error_var
+        state.avg_surprise = new_avg_surprise
+
         return h_new, state, surprise, rel_error_norm
 
 
@@ -385,12 +437,22 @@ def plot_results(
 if __name__ == "__main__":
     torch.manual_seed(42)
 
-    # -- features --------------------------------------------------------------
-    print("Loading audio and extracting mel-spectrograms...")
-    feats_a, feats_ab, switch_frame = make_features()
-    fps = SR / HOP
-    print(f"  Speaker A:  {feats_a.shape[0]} frames ({feats_a.shape[0]/fps:.1f}s)")
-    print(f"  Full clip:  {feats_ab.shape[0]} frames, switch at {switch_frame} ({switch_frame/fps:.1f}s)\n")
+    # -- features (real audio if available, synthetic otherwise) ---------------
+    import os
+    if os.path.exists(AUDIO_A) and os.path.exists(AUDIO_B):
+        print("Loading audio and extracting mel-spectrograms...")
+        feats_a, feats_ab, switch_frame = make_features()
+        fps = SR / HOP
+        print(f"  Speaker A:  {feats_a.shape[0]} frames ({feats_a.shape[0]/fps:.1f}s)")
+        print(f"  Full clip:  {feats_ab.shape[0]} frames, switch at {switch_frame} ({switch_frame/fps:.1f}s)\n")
+    else:
+        print("Audio files not found — using synthetic features (fast-weights smoke test).")
+        print(f"  Expected: {AUDIO_A}")
+        print(f"  Place real CommonVoice clips there for the full experiment.\n")
+        feats_a, feats_ab, switch_frame = make_synthetic_features()
+        fps = 100.0  # nominal
+        print(f"  Synthetic A: {feats_a.shape[0]} frames")
+        print(f"  Synthetic AB: {feats_ab.shape[0]} frames, switch at {switch_frame}\n")
 
     # -- model config ----------------------------------------------------------
     config = DREAMConfig(

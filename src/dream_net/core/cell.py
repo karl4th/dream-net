@@ -114,6 +114,10 @@ class DREAMCell(nn.Module):
         # Initialize weights
         self._init_weights()
 
+        # Fast weights are off by default — enable via enable_fast_weights()
+        # after pre-training is complete.
+        self.fast_weights_enabled: bool = False
+
     def _init_weights(self) -> None:
         """
         Initialize weights using Xavier/Kaiming initialization.
@@ -131,6 +135,14 @@ class DREAMCell(nn.Module):
 
         # V is already initialized with SVD
 
+
+    def enable_fast_weights(self) -> None:
+        """Switch on fast-weight adaptation (call after pre-training)."""
+        self.fast_weights_enabled = True
+
+    def disable_fast_weights(self) -> None:
+        """Switch off fast-weight adaptation (use during pre-training)."""
+        self.fast_weights_enabled = False
 
     def init_state(
         self,
@@ -360,15 +372,21 @@ class DREAMCell(nn.Module):
         x_norm = torch.clamp(x_norm, -1.0, 1.0)
 
         # ================================================================
-        # Dynamic Prediction — FAST WEIGHTS DISABLED
+        # Dynamic Prediction
         # ================================================================
-        # Fast weights were corrupting the learned C matrix.
-        # Rely on LTC + surprise gate for adaptation instead.
-
-        # Base prediction: x_pred = tanh(h @ C.T)  shape: (batch, input_dim)
+        # Base prediction from slow weights C
         x_pred_raw = state.h @ self.C.T
 
-        # Apply activation and scale
+        if self.fast_weights_enabled:
+            # Fast weight contribution: h @ U @ V.T
+            # (batch, 1, hidden) @ (batch, hidden, rank) → (batch, rank)
+            # (batch, rank) @ (rank, input) → (batch, input)
+            fast_contribution = (
+                torch.bmm(state.h.unsqueeze(1), state.U).squeeze(1)
+                @ self.V.T  # type: ignore[operator]
+            )
+            x_pred_raw = x_pred_raw + fast_contribution
+
         x_pred = torch.tanh(x_pred_raw) * x.norm(dim=-1, keepdim=True)
 
         # ================================================================
@@ -391,8 +409,12 @@ class DREAMCell(nn.Module):
         )
 
         # ================================================================
-        # Fast Weights Update — DISABLED
+        # Fast Weights Update
         # ================================================================
+        if self.fast_weights_enabled:
+            new_U = self.update_fast_weights(state.h, error, surprise, state)
+        else:
+            new_U = state.U
 
         # ================================================================
         # State Update with LTC — simplified without fast weights
@@ -436,7 +458,7 @@ class DREAMCell(nn.Module):
         # ================================================================
         new_state = DREAMState(
             h=h_new,
-            U=state.U,
+            U=new_U,
             U_target=new_U_target,
             adaptive_tau=new_adaptive_tau,
             error_mean=new_error_mean,
